@@ -1,0 +1,99 @@
+- hosts: all
+  become: yes
+
+  tasks:
+
+  - name: update system
+    apt:
+      update_cache: yes
+      upgrade: dist
+
+  - name: Add docker for ubuntu key
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: Add docker repository
+    apt_repository:
+      repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu  {{ ansible_distribution_release }}  stable"
+      update_cache: yes
+      state: present
+
+  - name: Install list of packages
+    apt:
+      update_cache: yes
+      name: "{{ item }}"
+    with_items:
+      - docker-ce
+      - python3-pip
+
+  - name: install docker.py
+    pip:
+      name: docker-py
+
+  - name: Create partition
+    parted:
+      device: /dev/vda
+      number: 1
+      state: present
+      part_end: 5GiB
+      flags: [ lvm ]
+
+  - name: Create physical volume and volume group
+    lvg:
+      vg: docker
+      pvs: /dev/vda1
+
+  - name: Create thinpool
+    lvol:
+      vg: docker
+      lv: "{{ item.lv }}"
+      size: "{{ item.size }}"
+      opts: "--wipesignatures y"
+    with_items:
+      - { lv: thinpool, size: 95%VG }
+      - { lv: thinpoolmeta, size: 1%VG }
+
+  - name: Convert storage pool to thinpool
+    command: lvconvert -y --zero n -c 512K --thinpool docker/thinpool --poolmetadata docker/thinpoolmeta
+
+  - name: Copy docker thinpool LVM profile
+    copy:
+      src: docker-thinpool.profile
+      dest: /etc/lvm/profile/
+      owner: root
+      group: root
+      mode: 0644
+
+  - name: Create /etc/docker if it doesnt exist
+    file:
+      path: /etc/docker
+      state: directory
+      mode: 0755
+
+  - name: Copy docker daemon config
+    copy:
+      src: daemon.json
+      dest: /etc/docker/daemon.json
+      owner: root
+      group: root
+      mode: 0644
+
+  - name: Apply new docker LVM storage profile
+    command: lvchange --metadataprofile docker-thinpool docker/thinpool
+
+  - name: Enable and reload docker service
+    service:
+      name: docker
+      enabled: yes
+      state: restarted
+
+  - name: Start nginx container
+    docker_container:
+      name: docker-nginx
+      image: nginx
+      published_ports: 80:80
+
+  - name: Print VM IP
+    debug:
+      var: ansible_all_ipv4_addresses
